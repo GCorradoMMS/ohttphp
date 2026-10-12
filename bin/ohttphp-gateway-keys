@@ -1,0 +1,237 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Gateway key management CLI for ohttphp.
+ *
+ * Commands:
+ *   generate --store DIR [--key-id N] [--kem x25519|p256|p384|p521]
+ *            [--suites "kdf:aead,kdf:aead"]
+ *   list     --store DIR
+ *   show     --store DIR --key-id N
+ *   retire   --store DIR --key-id N
+ *
+ * Key identifiers, KEM identifiers, and suite identifiers are printed.
+ * Secret key material is never printed.
+ *
+ * Algorithm identifiers (decimal, per the IANA HPKE registries):
+ *   KEM:  x25519 = 32, p256 = 16, p384 = 17, p521 = 18
+ *   KDF:  hkdf-sha256 = 1, hkdf-sha384 = 2, hkdf-sha512 = 3
+ *   AEAD: aes128gcm = 1, aes256gcm = 2, chacha20poly1305 = 3
+ */
+
+use Gcorradomms\Ohttphp\Exception\KeyStoreException;
+use Gcorradomms\Ohttphp\Gateway\FileGatewayKeyStore;
+use Gcorradomms\Ohttphp\Gateway\GatewayKeyPair;
+use Gcorradomms\Ohttphp\KeyConfig\AeadId;
+use Gcorradomms\Ohttphp\KeyConfig\KemId;
+use Gcorradomms\Ohttphp\KeyConfig\KdfId;
+use Gcorradomms\Ohttphp\KeyConfig\SymmetricSuite;
+
+foreach ([__DIR__ . '/../vendor/autoload.php', __DIR__ . '/../../../autoload.php'] as $autoload) {
+    if (is_file($autoload)) {
+        require $autoload;
+        break;
+    }
+}
+
+$usage = <<<USAGE
+Usage:
+  ohttphp-gateway-keys generate --store DIR [--key-id N] [--kem x25519|p256|p384|p521] [--suites "kdf:aead,..."]
+  ohttphp-gateway-keys list     --store DIR
+  ohttphp-gateway-keys show     --store DIR --key-id N
+  ohttphp-gateway-keys retire   --store DIR --key-id N
+
+Default suites: 1:1 (HKDF-SHA256 / AES-128-GCM), 1:3 (HKDF-SHA256 / ChaCha20Poly1305).
+
+USAGE;
+
+/**
+ * @param array<string, string> $options
+ */
+function option(array $options, string $name): ?string
+{
+    return $options[$name] ?? null;
+}
+
+/**
+ * @return array<string, string>
+ */
+function parse_options(array $argv): array
+{
+    $options = [];
+    $count = count($argv);
+    for ($i = 1; $i < $count; $i++) {
+        $arg = $argv[$i];
+        if (!str_starts_with($arg, '--')) {
+            continue;
+        }
+        $name = substr($arg, 2);
+        $next = $argv[$i + 1] ?? null;
+        if ($next !== null && !str_starts_with($next, '--')) {
+            $options[$name] = $next;
+            $i++;
+        }
+    }
+
+    return $options;
+}
+
+function fail(string $message): never
+{
+    fwrite(STDERR, 'error: ' . $message . PHP_EOL);
+    exit(1);
+}
+
+function parse_kem(string $name): KemId
+{
+    return match (strtolower($name)) {
+        'x25519' => KemId::DhkemX25519HkdfSha256,
+        'p256' => KemId::DhkemP256HkdfSha256,
+        'p384' => KemId::DhkemP384HkdfSha256,
+        'p521' => KemId::DhkemP521HkdfSha512,
+        default => fail("unknown KEM '$name'"),
+    };
+}
+
+/**
+ * @return list<SymmetricSuite>
+ */
+function parse_suites(string $spec): array
+{
+    $suites = [];
+    foreach (explode(',', $spec) as $entry) {
+        $parts = explode(':', trim($entry));
+        if (count($parts) !== 2) {
+            fail("invalid suite '$entry' (expected kdf:aead)");
+        }
+        $kdf = KdfId::tryFrom((int) $parts[0]);
+        $aead = AeadId::tryFrom((int) $parts[1]);
+        if ($kdf === null || $aead === null) {
+            fail("unsupported algorithm identifiers in '$entry'");
+        }
+        $suites[] = SymmetricSuite::from($kdf, $aead);
+    }
+    if (count($suites) === 0) {
+        fail('at least one suite is required');
+    }
+
+    return $suites;
+}
+
+/**
+ * @param list<SymmetricSuite> $suites
+ */
+function describe_suites(array $suites): string
+{
+    $parts = [];
+    foreach ($suites as $suite) {
+        $parts[] = $suite->kdfId . ':' . $suite->aeadId;
+    }
+
+    return implode(', ', $parts);
+}
+
+$command = $argv[1] ?? null;
+$options = parse_options($argv);
+if ($command === null || in_array($command, ['-h', '--help', 'help'], true)) {
+    fwrite(STDERR, $usage);
+    exit($command === null ? 1 : 0);
+}
+
+$store = option($options, 'store');
+if ($store === null) {
+    fail('the --store option is required');
+}
+
+try {
+    $keyStore = new FileGatewayKeyStore($store);
+} catch (KeyStoreException $e) {
+    fail($e->getMessage());
+}
+
+try {
+    switch ($command) {
+        case 'generate':
+            $keyIdRaw = option($options, 'key-id');
+            $keyId = $keyIdRaw !== null ? (int) $keyIdRaw : $keyStore->nextKeyIdentifier();
+            if ($keyId < 0 || $keyId > 255) {
+                fail('key identifier must be between 0 and 255');
+            }
+            $kem = parse_kem(option($options, 'kem') ?? 'x25519');
+            $suites = parse_suites(option($options, 'suites') ?? '1:1,1:3');
+
+            $pair = GatewayKeyPair::generate($keyId, $kem, $suites);
+            $keyStore->add($pair);
+
+            echo 'generated key ' . $pair->keyId
+                . ' kem=' . $kem->name
+                . ' suites=' . describe_suites($suites)
+                . ' state=active' . PHP_EOL;
+            echo 'public key (hex): ' . bin2hex($pair->publicKey()) . PHP_EOL;
+            echo 'publish the configuration from the gateway key configuration endpoint.' . PHP_EOL;
+            break;
+
+        case 'list':
+            $all = [];
+            foreach (range(0, 255) as $id) {
+                $pair = $keyStore->get($id);
+                if ($pair !== null) {
+                    $all[] = $pair;
+                }
+            }
+            if (count($all) === 0) {
+                echo 'no keys stored' . PHP_EOL;
+                break;
+            }
+            printf("%-6s %-8s %-24s %-16s %s\n", 'key', 'state', 'kem', 'suites', 'created');
+            foreach ($all as $pair) {
+                printf(
+                    "%-6d %-8s %-24s %-16s %s\n",
+                    $pair->keyId,
+                    $pair->state,
+                    $pair->kemId->name,
+                    describe_suites($pair->symmetricSuites),
+                    $pair->createdAt->format(DATE_ATOM)
+                );
+            }
+            break;
+
+        case 'show':
+            $keyIdRaw = option($options, 'key-id');
+            if ($keyIdRaw === null) {
+                fail('the --key-id option is required');
+            }
+            $pair = $keyStore->get((int) $keyIdRaw);
+            if ($pair === null) {
+                fail('unknown key identifier');
+            }
+            echo 'key id:      ' . $pair->keyId . PHP_EOL;
+            echo 'state:       ' . $pair->state . PHP_EOL;
+            echo 'kem:         ' . $pair->kemId->name . ' (' . $pair->kemId->value . ')' . PHP_EOL;
+            echo 'suites:      ' . describe_suites($pair->symmetricSuites) . PHP_EOL;
+            echo 'created:     ' . $pair->createdAt->format(DATE_ATOM) . PHP_EOL;
+            if ($pair->retiredAt !== null) {
+                echo 'retired:     ' . $pair->retiredAt->format(DATE_ATOM) . PHP_EOL;
+            }
+            echo 'public key:  ' . bin2hex($pair->publicKey()) . PHP_EOL;
+            break;
+
+        case 'retire':
+            $keyIdRaw = option($options, 'key-id');
+            if ($keyIdRaw === null) {
+                fail('the --key-id option is required');
+            }
+            $keyStore->retire((int) $keyIdRaw);
+            echo 'key ' . $keyIdRaw . ' retired; it still decrypts requests but is no longer advertised.' . PHP_EOL;
+            echo 'Keep it until clients have refreshed their key configuration.' . PHP_EOL;
+            break;
+
+        default:
+            fail("unknown command '$command'\n" . $usage);
+    }
+} catch (KeyStoreException $e) {
+    fail($e->getMessage());
+}

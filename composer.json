@@ -1,0 +1,58 @@
+{
+    "name": "gcorradomms/ohttphp",
+    "description": "PHP implementation of Oblivious HTTP (RFC 9458), including client, relay, and gateway roles.",
+    "type": "library",
+    "license": "MIT",
+    "keywords": [
+        "ohttp",
+        "oblivious-http",
+        "rfc9458",
+        "rfc9292",
+        "hpke",
+        "privacy"
+    ],
+    "autoload": {
+        "psr-4": {
+            "Gcorradomms\\Ohttphp\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Gcorradomms\\Ohttphp\\Tests\\": "tests/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Gustavo Corrado",
+            "email": "gustavocorrado98@gmail.com"
+        }
+    ],
+    "bin": [
+        "bin/ohttphp-gateway-keys"
+    ],
+    "require": {
+        "php": "^8.2",
+        "ext-gmp": "*",
+        "ext-openssl": "*",
+        "paragonie/hpke": "^0.8.0",
+        "psr/http-client": "^1.0",
+        "psr/http-factory": "^1.0",
+        "psr/http-message": "^1.1 || ^2.0",
+        "psr/http-server-handler": "^1.0",
+        "psr/log": "^3.0"
+    },
+    "require-dev": {
+        "guzzlehttp/guzzle": "^7.9",
+        "nyholm/psr7": "^1.8",
+        "nyholm/psr7-server": "^1.1",
+        "phpstan/phpstan": "^2.0",
+        "phpunit/phpunit": "^11.5"
+    },
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse"
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

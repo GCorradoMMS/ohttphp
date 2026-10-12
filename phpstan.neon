@@ -1,0 +1,9 @@
+php:
+    version: 8.2
+
+parameters:
+    level: max
+    paths:
+        - src
+        - tests
+    tmpDir: build/phpstan
